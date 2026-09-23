@@ -35,7 +35,7 @@ func NewWaferProvider(config *schemas.ProviderConfig, logger schemas.Logger) (*W
 		WriteTimeout:        requestTimeout,
 		MaxConnsPerHost:     config.NetworkConfig.MaxConnsPerHost,
 		MaxIdleConnDuration: 30 * time.Second,
-		MaxConnWaitTimeout:  requestTimeout,
+		MaxConnWaitTimeout:  providerUtils.MaxConnWaitTimeout(config.NetworkConfig, requestTimeout),
 		MaxConnDuration:     time.Second * time.Duration(schemas.DefaultMaxConnDurationInSeconds),
 		ConnPoolStrategy:    fasthttp.FIFO,
 	}

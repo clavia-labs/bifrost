@@ -6790,6 +6790,11 @@
           "maximum": 10000,
           "description": "Maximum number of TCP connections per provider host. For HTTP/2 (e.g. Bedrock), each connection supports ~100 concurrent streams. Default: 5000."
         },
+        "max_conn_wait_timeout_in_seconds": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "How long a request waits for a free pooled connection when the provider host is at max_conns_per_host, in seconds. Unset waits up to default_request_timeout_in_seconds. 0 fails the request immediately so fallbacks apply."
+        },
         "enforce_http2": {
           "type": "boolean",
           "description": "Force HTTP/2 on provider connections (relevant for Bedrock and other net/http-based providers)"

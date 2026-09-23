@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/bytedance/sonic"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -1179,6 +1180,57 @@ func TestNetworkConfig_HTTP2PingInterval(t *testing.T) {
 	cfgOverflow := &ProviderConfig{NetworkConfig: NetworkConfig{EnforceHTTP2: true, HTTP2PingIntervalInSeconds: HTTP2PingIntervalUpperBoundSeconds + 1}}
 	cfgOverflow.CheckAndSetDefaults()
 	assert.Equal(t, HTTP2PingIntervalUpperBoundSeconds, cfgOverflow.NetworkConfig.HTTP2PingIntervalInSeconds)
+}
+
+// TestNetworkConfig_MaxConnWaitTimeout verifies that max_conn_wait_timeout_in_seconds
+// distinguishes unset from 0, round-trips through encoding/json and sonic, and
+// rejects negative values.
+func TestNetworkConfig_MaxConnWaitTimeout(t *testing.T) {
+	decoders := map[string]func([]byte, any) error{
+		"encoding/json": json.Unmarshal,
+		"sonic":         sonic.Unmarshal,
+	}
+	for name, unmarshal := range decoders {
+		t.Run(name, func(t *testing.T) {
+			var unset NetworkConfig
+			require.NoError(t, unmarshal([]byte(`{"max_conns_per_host":8}`), &unset))
+			assert.Nil(t, unset.MaxConnWaitTimeoutInSeconds, "unset must stay nil so the request timeout applies")
+
+			var zero NetworkConfig
+			require.NoError(t, unmarshal([]byte(`{"max_conns_per_host":8,"max_conn_wait_timeout_in_seconds":0}`), &zero))
+			require.NotNil(t, zero.MaxConnWaitTimeoutInSeconds, "explicit 0 must be preserved")
+			assert.Equal(t, 0, *zero.MaxConnWaitTimeoutInSeconds)
+
+			var five NetworkConfig
+			require.NoError(t, unmarshal([]byte(`{"max_conn_wait_timeout_in_seconds":5}`), &five))
+			require.NotNil(t, five.MaxConnWaitTimeoutInSeconds)
+			assert.Equal(t, 5, *five.MaxConnWaitTimeoutInSeconds)
+
+			var negative NetworkConfig
+			err := unmarshal([]byte(`{"max_conn_wait_timeout_in_seconds":-1}`), &negative)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "max_conn_wait_timeout_in_seconds")
+		})
+	}
+
+	unsetData, err := json.Marshal(NetworkConfig{})
+	require.NoError(t, err)
+	assert.NotContains(t, string(unsetData), "max_conn_wait_timeout_in_seconds", "nil must be omitted")
+
+	for _, seconds := range []int{0, 5} {
+		for name, marshal := range map[string]func(any) ([]byte, error){"encoding/json": json.Marshal, "sonic": sonic.Marshal} {
+			data, err := marshal(NetworkConfig{MaxConnWaitTimeoutInSeconds: Ptr(seconds)})
+			require.NoError(t, err, name)
+			var decoded NetworkConfig
+			require.NoError(t, json.Unmarshal(data, &decoded), name)
+			require.NotNil(t, decoded.MaxConnWaitTimeoutInSeconds, "%s: %d must round-trip", name, seconds)
+			assert.Equal(t, seconds, *decoded.MaxConnWaitTimeoutInSeconds, name)
+		}
+	}
+
+	redacted := (&NetworkConfig{MaxConnWaitTimeoutInSeconds: Ptr(0)}).Redacted()
+	require.NotNil(t, redacted.MaxConnWaitTimeoutInSeconds)
+	assert.Equal(t, 0, *redacted.MaxConnWaitTimeoutInSeconds)
 }
 
 // TestNormalizeResponsesToolType verifies that versioned/provider-specific tool type
