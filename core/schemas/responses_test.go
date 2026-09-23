@@ -945,3 +945,60 @@ func TestDeepCopyResponsesMessagePreservesMediaResolution(t *testing.T) {
 		t.Fatalf("numTokens = %d, want 512", *got.NumTokens)
 	}
 }
+
+// TestStreamWithDefaultsDropsSignatureOnlyReasoningDelta verifies the OpenAI-format
+// stream omits a reasoning_summary_text.delta that carries only a signature, since
+// OpenAI requires delta on that event, and keeps reasoning deltas that carry text.
+func TestStreamWithDefaultsDropsSignatureOnlyReasoningDelta(t *testing.T) {
+	signatureOnly := &BifrostResponsesStreamResponse{
+		Type:         ResponsesStreamResponseTypeReasoningSummaryTextDelta,
+		OutputIndex:  Ptr(0),
+		SummaryIndex: Ptr(0),
+		ItemID:       Ptr("rs_1"),
+		Signature:    Ptr("sig"),
+	}
+	if out := signatureOnly.WithDefaults(); out != nil {
+		t.Fatalf("signature-only reasoning delta must be dropped, got %+v", out)
+	}
+
+	withText := &BifrostResponsesStreamResponse{
+		Type:         ResponsesStreamResponseTypeReasoningSummaryTextDelta,
+		OutputIndex:  Ptr(0),
+		SummaryIndex: Ptr(0),
+		ItemID:       Ptr("rs_1"),
+		Delta:        Ptr("thinking"),
+	}
+	out := withText.WithDefaults()
+	if out == nil || out.Delta == nil || *out.Delta != "thinking" {
+		t.Fatalf("reasoning delta with text must pass through, got %+v", out)
+	}
+}
+
+// TestStreamWithDefaultsLifecycleStatus verifies response.created and
+// response.in_progress default an unset status to in_progress, while
+// response.completed keeps the completed default and explicit statuses pass through.
+func TestStreamWithDefaultsLifecycleStatus(t *testing.T) {
+	cases := []struct {
+		typ    ResponsesStreamResponseType
+		status *string
+		want   string
+	}{
+		{ResponsesStreamResponseTypeCreated, nil, ResponsesResponseStatusInProgress},
+		{ResponsesStreamResponseTypeInProgress, nil, ResponsesResponseStatusInProgress},
+		{ResponsesStreamResponseTypeCreated, Ptr(ResponsesResponseStatusQueued), ResponsesResponseStatusQueued},
+		{ResponsesStreamResponseTypeCompleted, nil, ResponsesResponseStatusCompleted},
+	}
+	for _, tc := range cases {
+		src := &BifrostResponsesStreamResponse{
+			Type:     tc.typ,
+			Response: &BifrostResponsesResponse{ID: Ptr("resp_1"), Status: tc.status},
+		}
+		out := src.WithDefaults()
+		if out.Response.Status == nil || *out.Response.Status != tc.want {
+			t.Errorf("%s: status = %v, want %s", tc.typ, out.Response.Status, tc.want)
+		}
+		if src.Response.Status != tc.status {
+			t.Errorf("%s: mutated source response status", tc.typ)
+		}
+	}
+}
