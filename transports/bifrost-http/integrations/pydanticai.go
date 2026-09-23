@@ -69,6 +69,9 @@ func withPydanticResponsesNullNormalization(routes []RouteConfig) []RouteConfig 
 				}
 
 				normalized := resp.WithDefaults()
+				if normalized == nil {
+					return "", nil, nil
+				}
 				ensurePydanticResponsesStreamTextFields(normalized)
 				return string(resp.Type), normalized, nil
 			}

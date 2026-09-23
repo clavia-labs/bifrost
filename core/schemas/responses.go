@@ -3943,6 +3943,13 @@ func (resp *BifrostResponsesStreamResponse) WithDefaults() *BifrostResponsesStre
 		return nil
 	}
 
+	// A reasoning delta without text carries only a thinking-block signature. OpenAI
+	// requires delta on this event and has no signature delta; the signature reaches
+	// OpenAI clients as encrypted_content on the reasoning item's output_item.done.
+	if resp.Type == ResponsesStreamResponseTypeReasoningSummaryTextDelta && resp.Delta == nil {
+		return nil
+	}
+
 	result := &BifrostResponsesStreamResponse{
 		Type:           resp.Type,
 		SequenceNumber: resp.SequenceNumber,
@@ -3950,6 +3957,12 @@ func (resp *BifrostResponsesStreamResponse) WithDefaults() *BifrostResponsesStre
 
 	// Copy nested response (applies defaults)
 	result.Response = resp.Response.WithDefaults()
+	// A response that has not finished is in progress, so the "completed" status
+	// default applies only to terminal events.
+	if (resp.Type == ResponsesStreamResponseTypeCreated || resp.Type == ResponsesStreamResponseTypeInProgress) &&
+		result.Response != nil && resp.Response.Status == nil {
+		result.Response.Status = Ptr(ResponsesResponseStatusInProgress)
+	}
 	// OpenAI Responses API requires usage=null on response.created; final usage is on response.completed only
 	if resp.Type == ResponsesStreamResponseTypeCreated && result.Response != nil {
 		result.Response.Usage = nil

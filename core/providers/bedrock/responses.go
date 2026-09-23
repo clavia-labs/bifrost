@@ -41,6 +41,8 @@ type BedrockResponsesStreamState struct {
 	HasEmittedCreated         bool                                                           // Whether we've emitted response.created
 	HasEmittedInProgress      bool                                                           // Whether we've emitted response.in_progress
 	UsedStructuredOutputTool  bool                                                           // True when the SO tool block was intercepted and converted to text content
+	StructuredOutputBlock     *int                                                           // Bedrock contentBlockIndex of the SO tool block whose message item is open, nil otherwise
+	StructuredOutputIndex     int                                                            // output_index of the open SO message item; valid while StructuredOutputBlock is set
 	Ctx                       context.Context                                                // Request context for restoring aliased tool names
 }
 
@@ -160,6 +162,8 @@ func acquireBedrockResponsesStreamState() *BedrockResponsesStreamState {
 	state.HasEmittedCreated = false
 	state.HasEmittedInProgress = false
 	state.UsedStructuredOutputTool = false
+	state.StructuredOutputBlock = nil
+	state.StructuredOutputIndex = 0
 	state.Ctx = nil
 	return state
 }
@@ -262,6 +266,8 @@ func (state *BedrockResponsesStreamState) flush() {
 	state.HasEmittedCreated = false
 	state.HasEmittedInProgress = false
 	state.UsedStructuredOutputTool = false
+	state.StructuredOutputBlock = nil
+	state.StructuredOutputIndex = 0
 }
 
 // Each Bedrock reasoning block becomes its own reasoning item, so it holds a single
@@ -1330,6 +1336,139 @@ func emitNovaGroundingDoneEvents(outputIndex, contentIndex int, itemID string, c
 	}
 }
 
+// bedrockOutputTextPart returns an output_text content part holding text.
+func bedrockOutputTextPart(text string) *schemas.ResponsesMessageContentBlock {
+	return &schemas.ResponsesMessageContentBlock{
+		Type: schemas.ResponsesOutputMessageContentTypeText,
+		Text: &text,
+		ResponsesOutputMessageContentText: &schemas.ResponsesOutputMessageContentText{
+			LogProbs:    []schemas.ResponsesOutputMessageContentTextLogProb{},
+			Annotations: []schemas.ResponsesOutputMessageContentTextAnnotation{},
+		},
+	}
+}
+
+// startBedrockStructuredOutputItem opens the assistant message item that carries the
+// structured-output tool block at contentBlockIndex as output_text. The item takes the
+// next output index and the text item ID scheme, so it is ordered with the turn's other
+// items and appears in response.completed's Output.
+func startBedrockStructuredOutputItem(state *BedrockResponsesStreamState, contentBlockIndex, sequenceNumber int) []*schemas.BifrostResponsesStreamResponse {
+	outputIndex := state.CurrentOutputIndex
+	state.CurrentOutputIndex++
+	state.StructuredOutputBlock = schemas.Ptr(contentBlockIndex)
+	state.StructuredOutputIndex = outputIndex
+
+	itemID := fmt.Sprintf("item_%d", outputIndex)
+	if state.MessageID != nil {
+		itemID = fmt.Sprintf("msg_%s_item_%d", *state.MessageID, outputIndex)
+	}
+	state.ItemIDs[outputIndex] = itemID
+	state.TextBuffers[outputIndex] = &strings.Builder{}
+
+	messageType := schemas.ResponsesMessageTypeMessage
+	role := schemas.ResponsesInputMessageRoleAssistant
+	return []*schemas.BifrostResponsesStreamResponse{
+		{
+			Type:           schemas.ResponsesStreamResponseTypeOutputItemAdded,
+			SequenceNumber: sequenceNumber,
+			OutputIndex:    schemas.Ptr(outputIndex),
+			Item: &schemas.ResponsesMessage{
+				ID:     &itemID,
+				Type:   &messageType,
+				Role:   &role,
+				Status: schemas.Ptr(schemas.ResponsesResponseStatusInProgress),
+				Content: &schemas.ResponsesMessageContent{
+					ContentBlocks: []schemas.ResponsesMessageContentBlock{},
+				},
+			},
+		},
+		{
+			Type:           schemas.ResponsesStreamResponseTypeContentPartAdded,
+			SequenceNumber: sequenceNumber + 1,
+			OutputIndex:    schemas.Ptr(outputIndex),
+			ContentIndex:   schemas.Ptr(0),
+			ItemID:         &itemID,
+			Part:           bedrockOutputTextPart(""),
+		},
+	}
+}
+
+// bedrockStructuredOutputTextDelta returns the output_text.delta for a chunk of the open
+// structured-output tool input, or nil for an empty chunk.
+func bedrockStructuredOutputTextDelta(state *BedrockResponsesStreamState, delta string, sequenceNumber int) *schemas.BifrostResponsesStreamResponse {
+	if delta == "" {
+		return nil
+	}
+	outputIndex := state.StructuredOutputIndex
+	state.TextBuffers[outputIndex].WriteString(delta)
+	itemID := state.ItemIDs[outputIndex]
+	return &schemas.BifrostResponsesStreamResponse{
+		Type:           schemas.ResponsesStreamResponseTypeOutputTextDelta,
+		SequenceNumber: sequenceNumber,
+		OutputIndex:    schemas.Ptr(outputIndex),
+		ContentIndex:   schemas.Ptr(0),
+		ItemID:         &itemID,
+		Delta:          &delta,
+		LogProbs:       []schemas.ResponsesOutputMessageContentTextLogProb{},
+	}
+}
+
+// closeBedrockStructuredOutputItem completes the open structured-output message item
+// with the accumulated tool input and records it for response.completed. It returns
+// nil when no structured-output item is open.
+func closeBedrockStructuredOutputItem(state *BedrockResponsesStreamState, sequenceNumber int) []*schemas.BifrostResponsesStreamResponse {
+	if state.StructuredOutputBlock == nil {
+		return nil
+	}
+	outputIndex := state.StructuredOutputIndex
+	state.StructuredOutputBlock = nil
+	itemID := state.ItemIDs[outputIndex]
+	text := ""
+	if buf := state.TextBuffers[outputIndex]; buf != nil {
+		text = buf.String()
+	}
+	delete(state.TextBuffers, outputIndex)
+
+	messageType := schemas.ResponsesMessageTypeMessage
+	role := schemas.ResponsesInputMessageRoleAssistant
+	responses := []*schemas.BifrostResponsesStreamResponse{
+		{
+			Type:           schemas.ResponsesStreamResponseTypeOutputTextDone,
+			SequenceNumber: sequenceNumber,
+			OutputIndex:    schemas.Ptr(outputIndex),
+			ContentIndex:   schemas.Ptr(0),
+			ItemID:         &itemID,
+			Text:           schemas.Ptr(text),
+			LogProbs:       []schemas.ResponsesOutputMessageContentTextLogProb{},
+		},
+		{
+			Type:           schemas.ResponsesStreamResponseTypeContentPartDone,
+			SequenceNumber: sequenceNumber + 1,
+			OutputIndex:    schemas.Ptr(outputIndex),
+			ContentIndex:   schemas.Ptr(0),
+			ItemID:         &itemID,
+			Part:           bedrockOutputTextPart(text),
+		},
+		{
+			Type:           schemas.ResponsesStreamResponseTypeOutputItemDone,
+			SequenceNumber: sequenceNumber + 2,
+			OutputIndex:    schemas.Ptr(outputIndex),
+			Item: &schemas.ResponsesMessage{
+				ID:     &itemID,
+				Type:   &messageType,
+				Role:   &role,
+				Status: schemas.Ptr(schemas.ResponsesResponseStatusCompleted),
+				Content: &schemas.ResponsesMessageContent{
+					ContentBlocks: []schemas.ResponsesMessageContentBlock{*bedrockOutputTextPart(text)},
+				},
+			},
+		},
+	}
+	state.CompletedOutputIndices[outputIndex] = true
+	recordBedrockOutputItems(state, responses)
+	return responses
+}
+
 // FinalizeBedrockStream finalizes the stream by closing any open items and emitting completed event
 func FinalizeBedrockStream(state *BedrockResponsesStreamState, sequenceNumber int, usage *schemas.ResponsesResponseUsage, trace *BedrockConverseTrace) []*schemas.BifrostResponsesStreamResponse {
 	var responses []*schemas.BifrostResponsesStreamResponse
@@ -1371,6 +1510,9 @@ func FinalizeBedrockStream(state *BedrockResponsesStreamState, sequenceNumber in
 		})
 		state.HasEmittedInProgress = true
 	}
+
+	// Close a structured-output item whose tool block did not stop before the stream ended
+	responses = append(responses, closeBedrockStructuredOutputItem(state, sequenceNumber+len(responses))...)
 
 	// Close any open items (text items and tool calls)
 	for contentIndex, outputIndex := range state.ContentIndexToOutputIndex {
