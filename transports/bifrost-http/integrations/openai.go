@@ -283,6 +283,35 @@ func openAIResponsesWireConverter(ctx *schemas.BifrostContext, resp *schemas.Bif
 	return openAIWireCostResponse(resp.WithDefaults()), nil
 }
 
+// openAIResponsesStreamErrorEvent is the OpenAI Responses API error stream event.
+// Code and param serialize as null when unset because OpenAI clients require both keys.
+type openAIResponsesStreamErrorEvent struct {
+	Type    string  `json:"type"`
+	Code    *string `json:"code"`
+	Message string  `json:"message"`
+	Param   *string `json:"param"`
+}
+
+// openAIResponsesStreamErrorConverter maps a BifrostError to the error event of an
+// OpenAI Responses stream.
+func openAIResponsesStreamErrorConverter(_ *schemas.BifrostContext, err *schemas.BifrostError) interface{} {
+	event := &openAIResponsesStreamErrorEvent{Type: string(schemas.ResponsesStreamResponseTypeError)}
+	if err != nil && err.Error != nil {
+		event.Code = err.Error.Code
+		event.Message = err.Error.Message
+		if event.Message == "" && err.Error.Error != nil {
+			event.Message = err.Error.Error.Error()
+		}
+		if param, ok := err.Error.Param.(string); ok {
+			event.Param = &param
+		}
+	}
+	if event.Message == "" {
+		event.Message = "An error occurred while processing your request"
+	}
+	return event
+}
+
 // CreateOpenAIRouteConfigs creates route configurations for OpenAI endpoints.
 func CreateOpenAIRouteConfigs(pathPrefix string, handlerStore lib.HandlerStore) []RouteConfig {
 	var routes []RouteConfig
@@ -531,6 +560,11 @@ func CreateOpenAIRouteConfigs(pathPrefix string, handlerStore lib.HandlerStore) 
 				return string(resp.Type), openAIWireCostResponse(converted), nil
 			},
 			ErrorConverter: func(ctx *schemas.BifrostContext, err *schemas.BifrostError) interface{} {
+				if ctx != nil {
+					if reqType, _ := ctx.Value(schemas.BifrostContextKeyHTTPRequestType).(schemas.RequestType); reqType == schemas.ResponsesRequest {
+						return openAIResponsesStreamErrorConverter(ctx, err)
+					}
+				}
 				return err
 			},
 		},
@@ -746,9 +780,7 @@ func CreateOpenAIRouteConfigs(pathPrefix string, handlerStore lib.HandlerStore) 
 					}
 					return string(resp.Type), openAIWireCostResponse(converted), nil
 				},
-				ErrorConverter: func(ctx *schemas.BifrostContext, err *schemas.BifrostError) interface{} {
-					return err
-				},
+				ErrorConverter: openAIResponsesStreamErrorConverter,
 			},
 			PreCallback: func(ctx *fasthttp.RequestCtx, bifrostCtx *schemas.BifrostContext, req interface{}) error {
 				hydrateOpenAIRequestFromLargePayloadMetadata(ctx, bifrostCtx, req)
@@ -840,9 +872,7 @@ func CreateOpenAIRouteConfigs(pathPrefix string, handlerStore lib.HandlerStore) 
 					}
 					return string(resp.Type), openAIWireCostResponse(converted), nil
 				},
-				ErrorConverter: func(ctx *schemas.BifrostContext, err *schemas.BifrostError) interface{} {
-					return err
-				},
+				ErrorConverter: openAIResponsesStreamErrorConverter,
 			},
 			ErrorConverter: func(ctx *schemas.BifrostContext, err *schemas.BifrostError) interface{} {
 				return err
