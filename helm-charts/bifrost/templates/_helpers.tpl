@@ -514,6 +514,9 @@ false
 {{- if hasKey $providerConfig.network_config "max_conns_per_host" }}
 {{- $_ := set $networkConfig "max_conns_per_host" $providerConfig.network_config.max_conns_per_host }}
 {{- end }}
+{{- if hasKey $providerConfig.network_config "max_conn_wait_timeout_in_seconds" }}
+{{- $_ := set $networkConfig "max_conn_wait_timeout_in_seconds" $providerConfig.network_config.max_conn_wait_timeout_in_seconds }}
+{{- end }}
 {{- if hasKey $providerConfig.network_config "enforce_http2" }}
 {{- $_ := set $networkConfig "enforce_http2" $providerConfig.network_config.enforce_http2 }}
 {{- end }}

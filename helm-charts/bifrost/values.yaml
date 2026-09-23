@@ -368,6 +368,7 @@ bifrost:
   #     stream_idle_timeout_in_seconds: 60            # Max wait for next stream chunk (default: 60)
   #     keep_alive_timeout_in_seconds: 30             # Idle keep-alive for pooled connections; set below the upstream's keep-alive (default: 30)
   #     max_conns_per_host: 5000                      # Max TCP connections per host (default: 5000)
+  #     max_conn_wait_timeout_in_seconds: 0           # Wait for a free connection at max_conns_per_host (unset = request timeout; 0 = fail immediately so fallbacks apply)
   #     enforce_http2: false                          # Force HTTP/2 on provider connections (e.g. Bedrock)
   #     http2_ping_interval_in_seconds: 0             # Idle seconds before a client-initiated HTTP/2 keepalive PING (0 = disabled; only when enforce_http2). Max 3600.
   #     insecure_skip_verify: false                   # Disable TLS certificate verification (last resort)

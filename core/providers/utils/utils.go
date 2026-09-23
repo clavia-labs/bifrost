@@ -2819,6 +2819,20 @@ func IsInvalidRequestError(err error) bool {
 	return errors.As(err, &invalid)
 }
 
+// MaxConnWaitTimeout returns how long a request waits for a free pooled
+// connection when the provider host is at MaxConnsPerHost. A nil
+// MaxConnWaitTimeoutInSeconds returns requestTimeout; zero or a negative value
+// returns 0, which makes fasthttp fail with ErrNoFreeConns immediately.
+func MaxConnWaitTimeout(config schemas.NetworkConfig, requestTimeout time.Duration) time.Duration {
+	if config.MaxConnWaitTimeoutInSeconds == nil {
+		return requestTimeout
+	}
+	if *config.MaxConnWaitTimeoutInSeconds <= 0 {
+		return 0
+	}
+	return time.Duration(*config.MaxConnWaitTimeoutInSeconds) * time.Second
+}
+
 // NewBifrostUpstreamConnectionError creates a standardized error for upstream
 // connectivity failures where Bifrost successfully dispatched to the provider
 // but the provider failed to return a response body (DNS lookup failure,
@@ -2827,7 +2841,14 @@ func IsInvalidRequestError(err error) bool {
 // distinguishing these retriable upstream failures from genuine HTTP 400
 // client-side bad-request errors. Mirrors NewBifrostTimeoutError; IsBifrostError
 // is false because the upstream provider is the cause.
+//
+// When err is fasthttp.ErrNoFreeConns the message is replaced with
+// schemas.ErrProviderNoFreeConns, so a request refused by the local connection
+// pool reads as pool exhaustion and still allows fallbacks.
 func NewBifrostUpstreamConnectionError(message string, err error) *schemas.BifrostError {
+	if errors.Is(err, fasthttp.ErrNoFreeConns) {
+		message = schemas.ErrProviderNoFreeConns
+	}
 	statusCode := 502
 	errorType := schemas.ProviderConnectionFailed
 	return &schemas.BifrostError{
