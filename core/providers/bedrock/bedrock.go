@@ -2008,7 +2008,6 @@ func (provider *BedrockProvider) ResponsesStream(ctx *schemas.BifrostContext, po
 		if toolName, ok := ctx.Value(schemas.BifrostContextKeyStructuredOutputToolName).(string); ok {
 			structuredOutputToolName = toolName
 		}
-		var isAccumulatingStructuredOutput bool
 
 		// Process AWS Event Stream format using proper decoder
 		lastChunkTime := startTime
@@ -2110,64 +2109,55 @@ func (provider *BedrockProvider) ResponsesStream(ctx *schemas.BifrostContext, po
 					accumulateBedrockResponsesUsage(usage, billedUsage, streamEvent.Usage)
 				}
 
-				// Handle structured output: intercept tool calls for the structured output tool
-				// and convert them to content instead of forwarding as tool calls
+				// Handle structured output: the structured output tool block becomes an
+				// assistant message item whose output_text is the tool input, instead of
+				// being forwarded as a tool call.
+				var responses []*schemas.BifrostResponsesStreamResponse
+				structuredOutputHandled := false
 				if structuredOutputToolName != "" {
-					// Check for tool use start event
-					if streamEvent.Start != nil && streamEvent.Start.ToolUse != nil {
-						if streamEvent.Start.ToolUse.Name == structuredOutputToolName {
-							// This is the structured output tool - start accumulating, don't forward
-							isAccumulatingStructuredOutput = true
-							streamState.UsedStructuredOutputTool = true
-							continue
+					soBlock := streamState.StructuredOutputBlock
+					switch {
+					case streamEvent.Start != nil && streamEvent.Start.ToolUse != nil && streamEvent.Start.ToolUse.Name == structuredOutputToolName:
+						contentBlockIndex := 0
+						if streamEvent.ContentBlockIndex != nil {
+							contentBlockIndex = *streamEvent.ContentBlockIndex
 						}
-					}
-
-					// Check for tool use delta event
-					if streamEvent.Delta != nil && streamEvent.Delta.ToolUse != nil && isAccumulatingStructuredOutput {
-						// Convert tool use delta to text delta
-						content := streamEvent.Delta.ToolUse.Input
-						response := &schemas.BifrostResponsesStreamResponse{
-							Type:           schemas.ResponsesStreamResponseTypeOutputTextDelta,
-							SequenceNumber: chunkIndex,
-							Delta:          &content,
-							ExtraFields: schemas.BifrostResponseExtraFields{
-								ChunkIndex: chunkIndex,
-								Latency:    time.Since(lastChunkTime).Milliseconds(),
-							},
+						streamState.UsedStructuredOutputTool = true
+						responses = startBedrockStructuredOutputItem(streamState, contentBlockIndex, chunkIndex)
+						structuredOutputHandled = true
+					case soBlock != nil && streamEvent.ContentBlockIndex != nil && *streamEvent.ContentBlockIndex == *soBlock:
+						if streamEvent.Delta != nil && streamEvent.Delta.ToolUse != nil {
+							responses = []*schemas.BifrostResponsesStreamResponse{
+								bedrockStructuredOutputTextDelta(streamState, streamEvent.Delta.ToolUse.Input, chunkIndex),
+							}
+						} else if streamEvent.Delta == nil && streamEvent.Start == nil {
+							// contentBlockStop carries only the block index
+							responses = closeBedrockStructuredOutputItem(streamState, chunkIndex)
 						}
-						chunkIndex++
-						lastChunkTime = time.Now()
-
-						if providerUtils.ShouldSendBackRawResponse(ctx, provider.sendBackRawResponse) {
-							response.ExtraFields.RawResponse = string(message.Payload)
-						}
-
-						providerUtils.ProcessAndSendResponse(ctx, postHookRunner, providerUtils.GetBifrostResponseForStreamResponse(nil, nil, response, nil, nil, nil), responseChan, postHookSpanFinalizer)
+						structuredOutputHandled = true
+					case streamEvent.Delta != nil && (streamEvent.Delta.Text != nil || streamEvent.Delta.ReasoningContent != nil):
+						// Suppress non-tool content events that would leak into the
+						// assembled structured output. Bedrock Claude can emit prose
+						// alongside the forced tool call (markdown, preambles, reasoning
+						// blocks); forwarding those as text deltas corrupts the JSON
+						// the client assembles from the structured-output stream.
 						continue
-					}
-
-					// Suppress non-tool content events that would leak into the
-					// assembled structured output. Bedrock Claude can emit prose
-					// alongside the forced tool call (markdown, preambles, reasoning
-					// blocks); forwarding those as text deltas corrupts the JSON
-					// the client assembles from the structured-output stream.
-					if streamEvent.Delta != nil && (streamEvent.Delta.Text != nil || streamEvent.Delta.ReasoningContent != nil) {
-						continue
-					}
-					if streamEvent.Start != nil && streamEvent.Start.ToolUse == nil {
+					case streamEvent.Start != nil && streamEvent.Start.ToolUse == nil:
 						continue // non-tool content-block start (text block) — drop
 					}
 				}
 
-				// Per-event mapping -> "convertor" (Convertor) stream phase.
-				convStart := time.Now()
-				responses, bifrostErr, _ := streamEvent.ToBifrostResponsesStream(chunkIndex, streamState)
-				schemas.AddStreamConvert(ctx, time.Since(convStart))
-				if bifrostErr != nil {
-					ctx.SetValue(schemas.BifrostContextKeyStreamEndIndicator, true)
-					providerUtils.ProcessAndSendBifrostError(ctx, postHookRunner, bifrostErr, responseChan, provider.logger, postHookSpanFinalizer)
-					return
+				if !structuredOutputHandled {
+					// Per-event mapping -> "convertor" (Convertor) stream phase.
+					convStart := time.Now()
+					var bifrostErr *schemas.BifrostError
+					responses, bifrostErr, _ = streamEvent.ToBifrostResponsesStream(chunkIndex, streamState)
+					schemas.AddStreamConvert(ctx, time.Since(convStart))
+					if bifrostErr != nil {
+						ctx.SetValue(schemas.BifrostContextKeyStreamEndIndicator, true)
+						providerUtils.ProcessAndSendBifrostError(ctx, postHookRunner, bifrostErr, responseChan, provider.logger, postHookSpanFinalizer)
+						return
+					}
 				}
 				for _, response := range responses {
 					if response != nil {
