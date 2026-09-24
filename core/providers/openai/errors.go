@@ -79,7 +79,30 @@ func responsesStreamError(response *schemas.BifrostResponsesStreamResponse) *sch
 		bifrostErr.Error.Message = fmt.Sprintf("provider stream error (%s)", details)
 	}
 
+	// An error event that arrives before any output is returned to the client as the
+	// HTTP response, so it carries the status the provider gives the same error on a
+	// non-stream request. Other codes keep no status, as before.
+	for _, key := range []*string{bifrostErr.Error.Code, bifrostErr.Error.Type} {
+		if key == nil {
+			continue
+		}
+		if status, ok := responsesStreamErrorStatus[*key]; ok {
+			bifrostErr.StatusCode = schemas.Ptr(status)
+			break
+		}
+	}
+
 	return bifrostErr
+}
+
+// responsesStreamErrorStatus maps the capacity and server error codes and types of
+// Responses stream error events to the HTTP status OpenAI and Azure return for them.
+var responsesStreamErrorStatus = map[string]int{
+	"rate_limit_exceeded":  fasthttp.StatusTooManyRequests,
+	"insufficient_quota":   fasthttp.StatusTooManyRequests,
+	"too_many_requests":    fasthttp.StatusTooManyRequests,
+	"server_error":         fasthttp.StatusInternalServerError,
+	"server_is_overloaded": fasthttp.StatusServiceUnavailable,
 }
 
 // ParseOpenAIError parses OpenAI error responses.
