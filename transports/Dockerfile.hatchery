@@ -1,5 +1,7 @@
 # --- UI Build Stage: Build the React + Vite frontend ---
-  FROM node:25-alpine3.23@sha256:bdf2cca6fe3dabd014ea60163eca3f0f7015fbd5c7ee1b0e9ccb4ced6eb02ef4 AS ui-builder
+  # The UI output is static, so this stage runs on the build host's platform: under
+  # QEMU arm64 emulation, vite build deadlocks while rendering chunks.
+  FROM --platform=$BUILDPLATFORM node:25-alpine3.23@sha256:bdf2cca6fe3dabd014ea60163eca3f0f7015fbd5c7ee1b0e9ccb4ced6eb02ef4 AS ui-builder
   WORKDIR /app
 
   # Apply latest alpine security patches before installing packages
