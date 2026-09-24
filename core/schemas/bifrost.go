@@ -1948,16 +1948,18 @@ func (bs BifrostStreamChunk) MarshalJSON() ([]byte, error) {
 // BifrostError represents an error from the Bifrost system.
 //
 // PLUGIN DEVELOPERS: When creating BifrostError in PreLLMHook or PostLLMHook, you can set AllowFallbacks:
-// - AllowFallbacks = &true: Bifrost will try fallback providers if available
+// - AllowFallbacks = &true: Bifrost will try fallback providers if available, whatever the status
 // - AllowFallbacks = &false: Bifrost will return this error immediately, no fallbacks
-// - AllowFallbacks = nil: Treated as true by default (fallbacks allowed for resilience)
+// - AllowFallbacks = nil: Bifrost tries fallbacks only after a capacity or availability failure
+//   (no status, 408, 429, 5xx, or a request Bifrost did not hand to the provider); any other
+//   4xx is returned immediately
 type BifrostError struct {
 	EventID        *string                 `json:"event_id,omitempty"`
 	Type           *string                 `json:"type,omitempty"`
 	IsBifrostError bool                    `json:"is_bifrost_error"`
 	StatusCode     *int                    `json:"status_code,omitempty"`
 	Error          *ErrorField             `json:"error"`
-	AllowFallbacks *bool                   `json:"-"` // Optional: Controls fallback behavior (nil = true by default)
+	AllowFallbacks *bool                   `json:"-"` // Optional: Controls fallback behavior (nil = capacity and availability failures only)
 	StreamControl  *StreamControl          `json:"-"` // Optional: Controls stream behavior
 	ExtraFields    BifrostErrorExtraFields `json:"extra_fields"`
 }
