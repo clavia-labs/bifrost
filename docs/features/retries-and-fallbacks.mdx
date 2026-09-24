@@ -225,10 +225,10 @@ Fallbacks provide automatic failover to a different provider when the primary fa
 ### How fallbacks work
 
 1. **Primary attempt**: Tries your configured provider with its full retry budget
-2. **Fallback decision**: If the primary fails (and the error is retryable at the provider level), Bifrost moves to the first fallback
+2. **Fallback decision**: If the primary fails with a capacity or availability failure, Bifrost moves to the first fallback. That covers errors with no HTTP status (network errors, timeouts, connection-pool exhaustion), `408`, `429`, any `5xx`, and requests Bifrost did not hand to the provider (no key serves the model, a governance refusal of that provider, or a Bifrost-side error). Any other `4xx` is the provider's verdict on the request itself, so Bifrost returns it immediately. The same rule decides whether a failed fallback moves on to the next one
 3. **Sequential fallbacks**: Each fallback provider also gets its own full retry budget
 4. **First success wins**: Returns the response from the first provider that succeeds
-5. **All fail**: Returns the original error from the primary provider. Exception: if a plugin on a fallback provider sets `AllowFallbacks = false` on the error (e.g. a security or compliance plugin that should halt the chain regardless of remaining fallbacks), Bifrost stops immediately and returns that fallback's error rather than continuing to the next provider or returning the primary error.
+5. **All fail**: Returns the error from the last provider tried. A fallback whose error ends the chain (a `4xx` rejection, or a plugin setting `AllowFallbacks = false`, e.g. a security or compliance plugin that should halt the chain regardless of remaining fallbacks) is returned immediately without trying the remaining providers.
 
 Each fallback is treated as a completely fresh request - all configured plugins (semantic caching, governance, logging) run again for the fallback provider.
 
@@ -407,7 +407,7 @@ Entries core emits:
 | Fallback skipped (no provider config) | Warn | `Fallback <p>/<m> skipped: missing provider config` |
 | Fallback succeeded | Info | `Request served by fallback <p>/<m> (attempt i/N)` |
 | Fallback halted by short-circuit | Error | `Fallback <p>/<m> failed (<type> HTTP <code>); halting further fallbacks` |
-| All fallbacks exhausted | Error | `All N fallback(s) exhausted; returning primary error (<type> HTTP <code>)` |
+| All fallbacks exhausted | Error | `All N fallback(s) exhausted; returning last error (<type> HTTP <code>)` |
 | Retry transition (rotated key) | Info | `Retry n/N for <p>/<m> (previous attempt failed: <type> HTTP <code>; rotated key=<name>)` |
 | Retry transition (same key) | Info | `Retry n/N for <p>/<m> (previous attempt failed: <type> HTTP <code>; same key=<name>)` |
 | Retry transition (keyless provider) | Info | `Retry n/N for <p>/<m> (previous attempt failed: <type> HTTP <code>)` |
@@ -453,7 +453,7 @@ When a fallback is triggered, the fallback request is treated as completely new:
 - Logging captures the fallback attempt separately
 - All configured plugins execute fresh for each provider in the chain
 
-**Plugin fallback control:** Plugins can prevent fallbacks from being triggered for specific error types. For example, a security plugin might disable fallbacks for compliance reasons. When a plugin sets `AllowFallbacks = false` on the error, the fallback chain is skipped entirely and the original error is returned immediately.
+**Plugin fallback control:** Plugins can override the fallback decision for their errors. For example, a security plugin might disable fallbacks for compliance reasons. When a plugin sets `AllowFallbacks = false` on the error, the fallback chain is skipped entirely and the original error is returned immediately. `AllowFallbacks = true` tries the fallbacks whatever the status, and leaving it unset applies the capacity and availability rule above.
 
 ---
 

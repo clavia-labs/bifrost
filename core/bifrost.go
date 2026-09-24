@@ -5153,10 +5153,9 @@ func (bifrost *Bifrost) shouldTryFallbacks(req *schemas.BifrostRequest, primaryE
 		return false
 	}
 
-	// Check if this is a short-circuit error that doesn't allow fallbacks
-	// Note: AllowFallbacks = nil is treated as true (allow fallbacks by default)
-	if primaryErr.AllowFallbacks != nil && !*primaryErr.AllowFallbacks {
-		bifrost.logger.Debug("allowFallbacks is false, we should not try fallbacks")
+	// Only a failure another provider can cure moves the request to a fallback
+	if !canFallbackAfter(primaryErr) {
+		bifrost.logger.Debug("primary error is not a capacity or availability failure, we should not try fallbacks")
 		return false
 	}
 
@@ -5309,13 +5308,38 @@ func (bifrost *Bifrost) shouldContinueWithFallbacks(fallback schemas.Fallback, f
 		return false
 	}
 
-	// Check if it was a short-circuit error that doesn't allow fallbacks
-	if fallbackErr.AllowFallbacks != nil && !*fallbackErr.AllowFallbacks {
+	// A fallback's own rejection of the request ends the chain, as it would for the primary
+	if !canFallbackAfter(fallbackErr) {
 		return false
 	}
 
 	bifrost.logger.Debug("Fallback provider %s failed: %s", fallback.Provider, fallbackErr.GetErrorString())
 	return true
+}
+
+// canFallbackAfter reports whether a failed attempt may move on to the next provider.
+// Fallbacks cover capacity and availability failures: no HTTP status (network errors,
+// in-band stream errors), 408, 429, 5xx, and requests Bifrost itself did not hand to the
+// provider (a Bifrost-side error, no key serving the model, or a governance refusal of
+// that provider). Any other 4xx is the provider's verdict on the request, which another
+// provider cannot cure, so the caller receives that provider's error.
+//
+// An explicit AllowFallbacks takes precedence: &false forbids fallbacks and &true forces
+// them, as documented on BifrostError for plugins.
+func canFallbackAfter(err *schemas.BifrostError) bool {
+	if err.AllowFallbacks != nil {
+		return *err.AllowFallbacks
+	}
+	if err.StatusCode == nil || err.IsBifrostError {
+		return true
+	}
+	status := *err.StatusCode
+	if status < 400 || status >= 500 || status == fasthttp.StatusRequestTimeout || status == fasthttp.StatusTooManyRequests {
+		return true
+	}
+	// Refusals Bifrost declares before dispatch carry a 4xx but never reached the provider.
+	declared := err.ExtraFields.ErrorType
+	return declared == schemas.ErrorTypeCallerModelNotAvailable || strings.HasPrefix(string(declared), "policy_")
 }
 
 // populateLatencyExtraFields stamps upstream and overhead onto resp's ExtraFields,
@@ -5495,9 +5519,9 @@ func (bifrost *Bifrost) handleRequest(ctx *schemas.BifrostContext, req *schemas.
 		lastErr = fallbackErr
 	}
 
-	ctx.AppendRoutingEngineLog(schemas.RoutingEngineCore, schemas.LogLevelError, fmt.Sprintf("All %d fallback(s) exhausted; returning primary error (%s)", len(fallbacks), routingErrorSummary(primaryErr)))
-	// All providers failed, return the original error
-	return nil, primaryErr
+	ctx.AppendRoutingEngineLog(schemas.RoutingEngineCore, schemas.LogLevelError, fmt.Sprintf("All %d fallback(s) exhausted; returning last error (%s)", len(fallbacks), routingErrorSummary(lastErr)))
+	// All providers failed; the last attempt's error is the chain's current state
+	return nil, lastErr
 }
 
 // handleStreamRequest handles the stream request to the provider based on the request type
@@ -5662,9 +5686,9 @@ func (bifrost *Bifrost) handleStreamRequest(ctx *schemas.BifrostContext, req *sc
 		lastErr = fallbackErr
 	}
 
-	ctx.AppendRoutingEngineLog(schemas.RoutingEngineCore, schemas.LogLevelError, fmt.Sprintf("All %d fallback(s) exhausted; returning primary error (%s)", len(fallbacks), routingErrorSummary(primaryErr)))
-	// All providers failed, return the original error
-	return nil, primaryErr
+	ctx.AppendRoutingEngineLog(schemas.RoutingEngineCore, schemas.LogLevelError, fmt.Sprintf("All %d fallback(s) exhausted; returning last error (%s)", len(fallbacks), routingErrorSummary(lastErr)))
+	// All providers failed; the last attempt's error is the chain's current state
+	return nil, lastErr
 }
 
 // tryRequest is a generic function that handles common request processing logic

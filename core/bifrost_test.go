@@ -3512,6 +3512,35 @@ func TestShouldContinueWithFallbacksStopsOnNilError(t *testing.T) {
 	}
 }
 
+// Errors that never reach a provider over HTTP, or that plugins shape, cannot be produced
+// through a mock upstream; TestFallbackPolicy covers the upstream statuses end to end.
+func TestCanFallbackAfter(t *testing.T) {
+	status := func(code int) *int { return &code }
+	cases := []struct {
+		name string
+		err  schemas.BifrostError
+		want bool
+	}{
+		{"no status", schemas.BifrostError{}, true},
+		{"provider 400", schemas.BifrostError{StatusCode: status(400)}, false},
+		{"provider 401", schemas.BifrostError{StatusCode: status(401)}, false},
+		{"provider 404", schemas.BifrostError{StatusCode: status(404)}, false},
+		{"provider 408", schemas.BifrostError{StatusCode: status(408)}, true},
+		{"provider 429", schemas.BifrostError{StatusCode: status(429)}, true},
+		{"provider 503", schemas.BifrostError{StatusCode: status(503)}, true},
+		{"bifrost-side 400", schemas.BifrostError{StatusCode: status(400), IsBifrostError: true}, true},
+		{"governance provider block", schemas.BifrostError{StatusCode: status(403), ExtraFields: schemas.BifrostErrorExtraFields{ErrorType: schemas.ErrorTypePolicyProviderBlocked}}, true},
+		{"governance budget", schemas.BifrostError{StatusCode: status(402), ExtraFields: schemas.BifrostErrorExtraFields{ErrorType: schemas.ErrorTypePolicyBudgetExceeded}}, true},
+		{"plugin forbids fallbacks on 503", schemas.BifrostError{StatusCode: status(503), AllowFallbacks: Ptr(false)}, false},
+		{"plugin forces fallbacks on 400", schemas.BifrostError{StatusCode: status(400), AllowFallbacks: Ptr(true)}, true},
+	}
+	for _, tc := range cases {
+		if got := canFallbackAfter(&tc.err); got != tc.want {
+			t.Errorf("%s: canFallbackAfter = %t, want %t", tc.name, got, tc.want)
+		}
+	}
+}
+
 // TestSelectKeyFromProviderForModelWithPool_SkipKeySelectionGatedOnBaseProvider verifies that the
 // Claude Code OAuth key-selection skip applies only when the attempt resolved to Anthropic. A
 // governance routing rule can rewrite provider/model after the transport set the flag, and every

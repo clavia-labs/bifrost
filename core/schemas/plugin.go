@@ -204,9 +204,9 @@ func ReleaseHTTPResponse(resp *HTTPResponse) {
 //
 // IMPORTANT: When returning BifrostError from PreLLMHook or PostLLMHook:
 // - You can set the AllowFallbacks field to control fallback behavior
-// - AllowFallbacks = &true: Allow Bifrost to try fallback providers
+// - AllowFallbacks = &true: Allow Bifrost to try fallback providers, whatever the status
 // - AllowFallbacks = &false: Do not try fallbacks, return error immediately
-// - AllowFallbacks = nil: Treated as true by default (allow fallbacks for resilience)
+// - AllowFallbacks = nil: Try fallbacks only after a capacity or availability failure (no status, 408, 429, 5xx)
 //
 // Plugin authors should ensure their hooks are robust to both response and error being nil, and should not assume either is always present.
 
